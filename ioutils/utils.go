@@ -175,3 +175,16 @@ func TransHttp(dest net.Conn, conn net.Conn) error {
 	fmt.Println("读取数据完成。。。")
 	return nil
 }
+
+func CopyTcp(dest net.Conn, src net.Conn) {
+	data := make([]byte, 1024)
+	for {
+		n, err1 := src.Read(data)
+		_, err2 := dest.Write(data[:n])
+		if err2 != nil || err1 != nil {
+			dest.Close()
+			src.Close()
+			break
+		}
+	}
+}

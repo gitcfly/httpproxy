@@ -2,11 +2,12 @@ package main
 
 import (
 	"bufio"
-	"github.com/gitcfly/httpproxy/log"
-	"github.com/sirupsen/logrus"
-	"io"
 	"net"
 	"time"
+
+	"github.com/gitcfly/httpproxy/ioutils"
+	"github.com/gitcfly/httpproxy/log"
+	"github.com/sirupsen/logrus"
 )
 
 func init() {
@@ -19,7 +20,7 @@ func init() {
 	logrus.AddHook(log.NewContextHook())
 }
 
-var clientPraviteKey = "client_pkey_1\n"
+var clientPrivateKey = "client_pkey_1"
 
 // tcp内网端口代理,支持http协议，客户端实现
 func main() {
@@ -28,7 +29,12 @@ func main() {
 		logrus.Error(err)
 		return
 	}
-	signalConn.Write([]byte(clientPraviteKey))
+	signalConn.Write([]byte(clientPrivateKey + "\n"))
+	go func() {
+		for range time.Tick(4 * time.Second) {
+			signalConn.Write([]byte("y"))
+		}
+	}()
 	for {
 		requestId, err := bufio.NewReader(signalConn).ReadBytes('\n')
 		if err != nil {
@@ -44,7 +50,7 @@ func main() {
 func RetrySignalConn() net.Conn {
 	for range time.Tick(2 * time.Second) {
 		if signalConn, err := net.Dial("tcp", "127.0.0.1:7777"); err == nil {
-			signalConn.Write([]byte(clientPraviteKey))
+			signalConn.Write([]byte(clientPrivateKey + "\n"))
 			return signalConn
 		} else {
 			logrus.Error(err)
@@ -55,6 +61,7 @@ func RetrySignalConn() net.Conn {
 
 func HandleTcpConn(requestId string) {
 	defer func() {
+		logrus.Infof("请求处理结束，requestId=%v", requestId)
 		if err := recover(); err != nil {
 			logrus.Error(err)
 		}
@@ -70,6 +77,6 @@ func HandleTcpConn(requestId string) {
 		logrus.Error(err)
 		return
 	}
-	go io.Copy(realConn, proxyConn)
-	io.Copy(proxyConn, realConn)
+	go ioutils.CopyTcp(proxyConn, realConn)
+	ioutils.CopyTcp(realConn, proxyConn)
 }

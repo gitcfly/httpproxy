@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"container/list"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/gitcfly/httpproxy/ioutils"
 	"github.com/gitcfly/httpproxy/log"
 	"github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
-	"io"
-	"net"
-	"sync"
 )
 
 func init() {
@@ -20,8 +24,16 @@ func init() {
 	logrus.AddHook(log.NewContextHook())
 }
 
+var TcpRecords = list.New()
+
+type TcpRecord struct {
+	clientKey   string
+	sgnConn     net.Conn
+	tcpListener net.Listener
+}
+
 var privateKey2port = map[string]string{
-	"client_pkey_1\n": ":8888",
+	"client_pkey_1": ":8888",
 }
 
 var privateKey2Server = map[string]net.Listener{}
@@ -36,27 +48,64 @@ func main() {
 		return
 	}
 	go TcpConnPool()
+	go HeartBreakCheck()
 	for {
 		signalConn, err := signalListener.Accept()
 		if err != nil {
 			logrus.Error(err)
 			return
 		}
-		privateKey, _ := bufio.NewReader(signalConn).ReadBytes('\n')
-		if listener := privateKey2Server[string(privateKey)]; listener != nil {
-			if err := listener.Close(); err != nil {
-				logrus.Error(err)
-			}
-			delete(privateKey2Server, string(privateKey))
-		}
-		addr := privateKey2port[string(privateKey)]
-		tcpListener, err := net.Listen("tcp", addr) //外部请求地址
-		if err != nil {
+		go SignalClient(signalConn)
+	}
+}
+
+func SignalClient(signalConn net.Conn) {
+	privateBytes, _ := bufio.NewReader(signalConn).ReadBytes('\n')
+	privateKey := string(bytes.TrimRight(privateBytes, "\n"))
+	if listener := privateKey2Server[privateKey]; listener != nil {
+		if err := listener.Close(); err != nil {
 			logrus.Error(err)
-			return
 		}
-		privateKey2Server[string(privateKey)] = tcpListener
-		go TcpServer(tcpListener, signalConn)
+		delete(privateKey2Server, privateKey)
+	}
+	addr, ok := privateKey2port[privateKey]
+	if !ok || addr == "" {
+		logrus.Error("未配置客户端口，key=%v", privateKey)
+		return
+	}
+	tcpListener, err := net.Listen("tcp", addr) //外部请求地址
+	if err != nil {
+		logrus.Error(err)
+		return
+	}
+	TcpRecords.PushBack(&TcpRecord{
+		clientKey:   privateKey,
+		sgnConn:     signalConn,
+		tcpListener: tcpListener},
+	)
+	privateKey2Server[privateKey] = tcpListener
+	TcpServer(tcpListener, signalConn)
+}
+
+func HeartBreakCheck() {
+	tmpData := make([]byte, 1)
+	for range time.Tick(5 * time.Second) {
+		var next *list.Element
+		for e := TcpRecords.Front(); e != nil; e = next {
+			next = e.Next()
+			tcpRecord := e.Value.(*TcpRecord)
+			if _, err := tcpRecord.sgnConn.Read(tmpData); err != nil {
+				logrus.Infof("client_key=%v,客户端代理连接超时，服务端主动关闭连接以及tcp服务,err=%v", tcpRecord.clientKey, err)
+				if err := tcpRecord.sgnConn.Close(); err != nil {
+					logrus.Error(err)
+				}
+				if err := tcpRecord.tcpListener.Close(); err != nil {
+					logrus.Error(err)
+				}
+				Request2Conn.Delete(tcpRecord.clientKey)
+				TcpRecords.Remove(e)
+			}
+		}
 	}
 }
 
@@ -91,19 +140,23 @@ func TcpServer(tcpListener net.Listener, signalConn net.Conn) {
 			logrus.Error(err)
 			return
 		}
-		go TransConnReqest(reqConn, requestId)
+		go RedirectConn(reqConn, requestId)
 	}
 }
 
-func TransConnReqest(reqConn net.Conn, requestId string) {
+func RedirectConn(reqConn net.Conn, requestId string) {
 	defer func() {
 		Request2Conn.Delete(requestId)
+		logrus.Infof("请求处理结束，requestId=%v", requestId)
+		if err := recover(); err != nil {
+			logrus.Error(err)
+		}
 	}()
 	for {
 		if tpConn, ok := Request2Conn.Load(requestId); ok {
 			proxyConn := tpConn.(net.Conn)
-			go io.Copy(proxyConn, reqConn)
-			io.Copy(reqConn, proxyConn)
+			go ioutils.CopyTcp(reqConn, proxyConn)
+			ioutils.CopyTcp(proxyConn, reqConn)
 			break
 		}
 	}
