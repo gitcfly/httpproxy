@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"github.com/gitcfly/httpproxy/log"
 	"github.com/sirupsen/logrus"
 	"io/ioutil"
 	"os"
@@ -25,7 +26,7 @@ func init() {
 		FullTimestamp:          true,
 		DisableLevelTruncation: true,
 	})
-	logrus.AddHook(NewContextHook())
+	logrus.AddHook(log.NewContextHook())
 	logrus.SetOutput(os.Stdout)
 	data, _ := ioutil.ReadFile("./config.json")
 	json.Unmarshal(data, &Config)
